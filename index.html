@@ -75,21 +75,38 @@
 <div id="divider"></div>
 <div id="hint"></div>
 
+<p id="err" style="color:#ff6b6b;font-size:14px;display:none"></p>
+<script>
+  // Läuft auch dann, wenn three.js nicht geladen werden kann
+  window.videoURL = null;
+  document.getElementById('file').addEventListener('change', function (e) {
+    var f = e.target.files[0];
+    if (!f) return;
+    if (window.videoURL) URL.revokeObjectURL(window.videoURL);
+    window.videoURL = URL.createObjectURL(f);
+    if (window.playerReady) document.getElementById('start').disabled = false;
+  });
+  function showErr(msg) {
+    var el = document.getElementById('err');
+    el.textContent = msg; el.style.display = 'block';
+    document.querySelector('#menu .box').appendChild(el);
+  }
+  setTimeout(function () {
+    if (!window.playerReady) showErr('Fehler: three.module.js wurde nicht gefunden oder ist beschädigt. ' +
+      'Prüfe, ob die Datei genau so heißt und neben der index.html liegt.');
+  }, 6000);
+  window.addEventListener('error', function (e) { if (!window.playerReady) showErr('Fehler: ' + e.message); });
+</script>
+
 <script type="module">
 import * as THREE from 'three';
 
 const $ = (id) => document.getElementById(id);
 const menu = $('menu'), hint = $('hint'), divider = $('divider');
-let videoURL = null;
 
 // ---------- Menü ----------
-$('file').addEventListener('change', (e) => {
-  const f = e.target.files[0];
-  if (!f) return;
-  if (videoURL) URL.revokeObjectURL(videoURL);
-  videoURL = URL.createObjectURL(f);
-  $('start').disabled = false;
-});
+window.playerReady = true;
+if (window.videoURL) $('start').disabled = false;
 $('ipd').addEventListener('input', (e) => { $('ipdVal').textContent = e.target.value; });
 
 // ---------- Video ----------
@@ -219,7 +236,7 @@ function showHint(text, ms = 2500) {
 // ---------- Start ----------
 $('start').addEventListener('click', async () => {
   // Video sofort im Tipp-Ereignis starten (iOS erlaubt Ton nur direkt nach dem Antippen)
-  video.src = videoURL;
+  video.src = window.videoURL;
   const playPromise = video.play().catch((err) => console.warn(err));
   // iOS: Bewegungssensoren nur nach Antippen und nur über HTTPS
   if (typeof DeviceOrientationEvent !== 'undefined' &&
