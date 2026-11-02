@@ -1,0 +1,300 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="VR-Player">
+<meta name="theme-color" content="#000000">
+<link rel="manifest" href="manifest.json">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<link rel="icon" type="image/png" href="icon-512.png">
+<title>Cardboard VR-Player – Bewerbungstraining</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #000; overflow: hidden;
+    font-family: -apple-system, system-ui, sans-serif; color: #fff;
+    -webkit-user-select: none; user-select: none; touch-action: none; }
+  canvas { display: block; position: fixed; inset: 0; }
+  #menu { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
+    background: #111; z-index: 10; overflow: auto; padding: 20px; box-sizing: border-box; }
+  #menu .box { max-width: 420px; width: 100%; }
+  h1 { font-size: 22px; margin: 0 0 6px; }
+  p { color: #bbb; font-size: 14px; line-height: 1.4; margin: 6px 0 14px; }
+  label { display: block; font-size: 14px; margin: 14px 0 6px; color: #ddd; }
+  select, input[type=file] { width: 100%; font-size: 16px; padding: 10px; box-sizing: border-box;
+    border-radius: 10px; border: 1px solid #444; background: #222; color: #fff; }
+  input[type=range] { width: 100%; }
+  button { width: 100%; font-size: 18px; padding: 14px; margin-top: 20px; border: 0; border-radius: 12px;
+    background: #2f7cf6; color: #fff; font-weight: 600; }
+  button:disabled { background: #444; color: #888; }
+  #hint { position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%); z-index: 5;
+    background: rgba(0,0,0,.7); padding: 12px 16px; border-radius: 10px; font-size: 15px;
+    text-align: center; pointer-events: none; display: none; }
+  #divider { position: fixed; top: 0; bottom: 0; left: 50%; width: 2px; margin-left: -1px;
+    background: #333; z-index: 4; display: none; pointer-events: none; }
+  .small { font-size: 12px; color: #888; }
+</style>
+<script type="importmap">
+{ "imports": { "three": "./three.module.js" } }
+</script>
+</head>
+<body>
+
+<div id="menu">
+  <div class="box">
+    <h1>Cardboard VR-Player</h1>
+    <p>Das Video wird nur auf diesem iPhone abgespielt und nirgendwo hochgeladen.</p>
+
+    <label for="file">1. Video auswählen</label>
+    <input id="file" type="file" accept="video/*">
+
+    <label for="mode">2. Videoformat</label>
+    <select id="mode">
+      <option value="360">360° (Rundumvideo)</option>
+      <option value="180">180° (Halbkugel)</option>
+      <option value="flat">Normales Video (virtuelle Leinwand)</option>
+    </select>
+
+    <label for="ipd">3. Linsenabstand: <span id="ipdVal">64</span> mm</label>
+    <input id="ipd" type="range" min="56" max="72" step="1" value="64">
+
+    <label for="ppi">4. Pixeldichte des Displays (ppi)</label>
+    <input id="ppi" type="number" inputmode="numeric" min="200" max="700" value="460"
+      style="width:100%;font-size:16px;padding:10px;box-sizing:border-box;border-radius:10px;border:1px solid #444;background:#222;color:#fff;">
+    <p class="small">iPhone 14 Pro: 460. Bei anderen Handys den ppi-Wert aus den technischen Daten eintragen
+      (z. B. „Pixel 9 Pro ppi“ googeln). Der Wert wird auf diesem Gerät gespeichert.</p>
+
+    <button id="start" disabled>Start</button>
+    <p class="small">iPhone quer in die Brille legen (Lautsprecher nach links/rechts egal).
+      Bildschirm antippen bzw. Cardboard-Taste drücken = Blickrichtung neu ausrichten.
+      Doppeltippen = Pause/Weiter. Wischen nach unten (mit Finger) = zurück zum Menü.</p>
+  </div>
+</div>
+<div id="divider"></div>
+<div id="hint"></div>
+
+<p id="err" style="color:#ff6b6b;font-size:14px;display:none"></p>
+<script>
+  // Läuft auch dann, wenn three.js nicht geladen werden kann
+  window.videoURL = null;
+  document.getElementById('file').addEventListener('change', function (e) {
+    var f = e.target.files[0];
+    if (!f) return;
+    if (window.videoURL) URL.revokeObjectURL(window.videoURL);
+    window.videoURL = URL.createObjectURL(f);
+    if (window.playerReady) document.getElementById('start').disabled = false;
+  });
+  function showErr(msg) {
+    var el = document.getElementById('err');
+    el.textContent = msg; el.style.display = 'block';
+    document.querySelector('#menu .box').appendChild(el);
+  }
+  setTimeout(function () {
+    if (!window.playerReady) showErr('Fehler: three.module.js wurde nicht gefunden oder ist beschädigt. ' +
+      'Prüfe, ob die Datei genau so heißt und neben der index.html liegt.');
+  }, 6000);
+  window.addEventListener('error', function (e) { if (!window.playerReady) showErr('Fehler: ' + e.message); });
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+
+const $ = (id) => document.getElementById(id);
+const menu = $('menu'), hint = $('hint'), divider = $('divider');
+
+// ---------- Menü ----------
+window.playerReady = true;
+if (window.videoURL) $('start').disabled = false;
+$('ipd').addEventListener('input', (e) => { $('ipdVal').textContent = e.target.value; });
+
+// ---------- Video ----------
+const video = document.createElement('video');
+video.setAttribute('playsinline', '');
+video.setAttribute('webkit-playsinline', '');
+video.crossOrigin = 'anonymous';
+video.loop = true;
+
+// ---------- Three.js ----------
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.setScissorTest(true);
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(80, 1, 0.1, 1000);
+const texture = new THREE.VideoTexture(video);
+texture.colorSpace = THREE.SRGBColorSpace;
+let screenMesh = null;
+
+function buildScreen(mode) {
+  if (screenMesh) { scene.remove(screenMesh); screenMesh.geometry.dispose(); }
+  let geo;
+  const mat = new THREE.MeshBasicMaterial({ map: texture });
+  if (mode === 'flat') {
+    // gebogene Leinwand, 3 m entfernt, Seitenverhältnis wie das Video
+    const aspect = (video.videoWidth && video.videoHeight) ? video.videoWidth / video.videoHeight : 16 / 9;
+    const arc = Math.PI / 2.4, radius = 3;
+    const height = (arc * radius) / aspect;
+    geo = new THREE.CylinderGeometry(radius, radius, height, 48, 1, true,
+      Math.PI - arc / 2, arc);
+    geo.scale(-1, 1, 1);
+  } else {
+    const is180 = mode === '180';
+    // Bildmitte (u = 0.5) liegt genau vor dem Betrachter (-Z)
+    const phiLength = is180 ? Math.PI : Math.PI * 2;
+    const phiStart = 1.5 * Math.PI - phiLength / 2;
+    geo = new THREE.SphereGeometry(500, 64, 40, phiStart, phiLength);
+    geo.scale(-1, 1, 1); // Innenseite der Kugel zeigen, nicht gespiegelt
+  }
+  screenMesh = new THREE.Mesh(geo, mat);
+  scene.add(screenMesh);
+}
+
+// ---------- Kopftracking (Gyroskop / DeviceOrientation) ----------
+const deviceQ = new THREE.Quaternion();
+const yawOffset = new THREE.Quaternion();
+const euler = new THREE.Euler();
+const zee = new THREE.Vector3(0, 0, 1);
+const yAxis = new THREE.Vector3(0, 1, 0);
+const q0 = new THREE.Quaternion();
+const qMinus90X = new THREE.Quaternion(-Math.sqrt(0.5), 0, 0, Math.sqrt(0.5)); // Kamera schaut aus der Rückseite
+let orientation = null;
+let needRecenter = true;
+
+window.addEventListener('deviceorientation', (e) => {
+  if (e.alpha !== null) orientation = e;
+});
+
+function screenAngle() {
+  if (screen.orientation && typeof screen.orientation.angle === 'number') return screen.orientation.angle;
+  return window.orientation || 0;
+}
+
+function updateCamera() {
+  if (!orientation) return;
+  const d = THREE.MathUtils.DEG2RAD;
+  euler.set(orientation.beta * d, orientation.alpha * d, -orientation.gamma * d, 'YXZ');
+  deviceQ.setFromEuler(euler);
+  deviceQ.multiply(qMinus90X);
+  deviceQ.multiply(q0.setFromAxisAngle(zee, -screenAngle() * d));
+
+  if (needRecenter) {
+    const e = new THREE.Euler().setFromQuaternion(deviceQ, 'YXZ');
+    yawOffset.setFromAxisAngle(yAxis, -e.y);
+    needRecenter = false;
+  }
+  camera.quaternion.copy(yawOffset).multiply(deviceQ);
+}
+
+// ---------- Stereo-Rendering (zwei Bildhälften, Abstand = Linsenabstand) ----------
+// CSS-Pixel pro mm = ppi / 25,4 / devicePixelRatio  (iPhone 14 Pro: 460 ppi -> ca. 6,04)
+let CSS_PX_PER_MM = 460 / 25.4 / 3;
+let ipdMM = 64;
+try {
+  const saved = localStorage.getItem('vrplayer-ppi');
+  if (saved) document.getElementById('ppi').value = saved;
+} catch (e) {}
+
+function render() {
+  const W = window.innerWidth, H = window.innerHeight;
+  let eyeW = Math.min(ipdMM * CSS_PX_PER_MM, W / 2);
+  camera.aspect = eyeW / H;
+  camera.updateProjectionMatrix();
+
+  renderer.setScissor(0, 0, W, H);
+  renderer.setViewport(0, 0, W, H);
+  renderer.setClearColor(0x000000);
+  renderer.clear();
+
+  const left = W / 2 - eyeW;
+  renderer.setScissor(left, 0, eyeW, H);
+  renderer.setViewport(left, 0, eyeW, H);
+  renderer.render(scene, camera);
+
+  renderer.setScissor(W / 2, 0, eyeW, H);
+  renderer.setViewport(W / 2, 0, eyeW, H);
+  renderer.render(scene, camera);
+}
+
+function loop() {
+  updateCamera();
+  render();
+}
+
+window.addEventListener('resize', () => renderer.setSize(window.innerWidth, window.innerHeight));
+
+function showHint(text, ms = 2500) {
+  hint.textContent = text;
+  hint.style.display = 'block';
+  clearTimeout(showHint.t);
+  if (ms) showHint.t = setTimeout(() => hint.style.display = 'none', ms);
+}
+
+// ---------- Start ----------
+$('start').addEventListener('click', async () => {
+  // Video sofort im Tipp-Ereignis starten (iOS erlaubt Ton nur direkt nach dem Antippen)
+  video.src = window.videoURL;
+  const playPromise = video.play().catch((err) => console.warn(err));
+  // iOS: Bewegungssensoren nur nach Antippen und nur über HTTPS
+  if (typeof DeviceOrientationEvent !== 'undefined' &&
+      typeof DeviceOrientationEvent.requestPermission === 'function') {
+    try {
+      const res = await DeviceOrientationEvent.requestPermission();
+      if (res !== 'granted') { alert('Ohne Zugriff auf die Bewegungssensoren gibt es kein Kopftracking.'); }
+    } catch (err) {
+      alert('Bewegungssensoren nicht verfügbar. Ist die Seite über https:// geöffnet?');
+    }
+  }
+  ipdMM = Number($('ipd').value);
+  const ppi = Number($('ppi').value) || 460;
+  CSS_PX_PER_MM = ppi / 25.4 / (window.devicePixelRatio || 1);
+  try { localStorage.setItem('vrplayer-ppi', String(ppi)); } catch (e) {}
+  // Android: Vollbild + Querformat sperren (iPhone unterstützt das nicht, wird dann übersprungen)
+  try {
+    if (document.documentElement.requestFullscreen) {
+      await document.documentElement.requestFullscreen();
+      if (screen.orientation && screen.orientation.lock) await screen.orientation.lock('landscape');
+    }
+  } catch (e) { /* nicht unterstützt */ }
+  await playPromise;
+  if (video.paused) { try { await video.play(); } catch (err) { console.warn(err); } }
+  await new Promise((r) => video.readyState >= 1 ? r() : video.addEventListener('loadedmetadata', r, { once: true }));
+  buildScreen($('mode').value);
+  menu.style.display = 'none';
+  divider.style.display = 'block';
+  needRecenter = true;
+  renderer.setAnimationLoop(loop);
+  if (window.innerWidth < window.innerHeight) showHint('iPhone quer drehen (Ausrichtungssperre aus!)', 4000);
+  else showHint('Geradeaus schauen und tippen = neu ausrichten');
+});
+
+// ---------- Gesten im Player ----------
+let lastTap = 0, touchStartY = null;
+renderer.domElement.addEventListener('touchstart', (e) => {
+  touchStartY = e.touches[0].clientY;
+}, { passive: true });
+renderer.domElement.addEventListener('touchend', (e) => {
+  const endY = e.changedTouches[0].clientY;
+  if (touchStartY !== null && endY - touchStartY > 120) { // nach unten wischen -> Menü
+    video.pause();
+    renderer.setAnimationLoop(null);
+    divider.style.display = 'none';
+    menu.style.display = 'flex';
+    return;
+  }
+  const now = Date.now();
+  if (now - lastTap < 350) {          // Doppeltippen -> Pause/Weiter
+    if (video.paused) { video.play(); showHint('▶︎', 800); } else { video.pause(); showHint('Pause', 800); }
+    lastTap = 0;
+  } else {                            // Einfach tippen -> neu ausrichten
+    needRecenter = true;
+    lastTap = now;
+  }
+});
+renderer.domElement.addEventListener('click', () => { needRecenter = true; }); // Desktop-Test
+</script>
+</body>
+</html>
