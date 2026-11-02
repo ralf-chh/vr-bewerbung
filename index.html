@@ -7,6 +7,8 @@
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="VR-Player">
+<meta name="theme-color" content="#000000">
+<link rel="manifest" href="manifest.json">
 <title>Cardboard VR-Player – Bewerbungstraining</title>
 <style>
   html, body { margin: 0; height: 100%; background: #000; overflow: hidden;
@@ -55,6 +57,12 @@
 
     <label for="ipd">3. Linsenabstand: <span id="ipdVal">64</span> mm</label>
     <input id="ipd" type="range" min="56" max="72" step="1" value="64">
+
+    <label for="ppi">4. Pixeldichte des Displays (ppi)</label>
+    <input id="ppi" type="number" inputmode="numeric" min="200" max="700" value="460"
+      style="width:100%;font-size:16px;padding:10px;box-sizing:border-box;border-radius:10px;border:1px solid #444;background:#222;color:#fff;">
+    <p class="small">iPhone 14 Pro: 460. Bei anderen Handys den ppi-Wert aus den technischen Daten eintragen
+      (z. B. „Pixel 9 Pro ppi“ googeln). Der Wert wird auf diesem Gerät gespeichert.</p>
 
     <button id="start" disabled>Start</button>
     <p class="small">iPhone quer in die Brille legen (Lautsprecher nach links/rechts egal).
@@ -163,9 +171,13 @@ function updateCamera() {
 }
 
 // ---------- Stereo-Rendering (zwei Bildhälften, Abstand = Linsenabstand) ----------
-// iPhone 14 Pro: 460 ppi, devicePixelRatio 3  ->  ca. 6,04 CSS-Pixel pro mm
-const CSS_PX_PER_MM = 460 / 25.4 / 3;
+// CSS-Pixel pro mm = ppi / 25,4 / devicePixelRatio  (iPhone 14 Pro: 460 ppi -> ca. 6,04)
+let CSS_PX_PER_MM = 460 / 25.4 / 3;
 let ipdMM = 64;
+try {
+  const saved = localStorage.getItem('vrplayer-ppi');
+  if (saved) document.getElementById('ppi').value = saved;
+} catch (e) {}
 
 function render() {
   const W = window.innerWidth, H = window.innerHeight;
@@ -204,6 +216,9 @@ function showHint(text, ms = 2500) {
 
 // ---------- Start ----------
 $('start').addEventListener('click', async () => {
+  // Video sofort im Tipp-Ereignis starten (iOS erlaubt Ton nur direkt nach dem Antippen)
+  video.src = videoURL;
+  const playPromise = video.play().catch((err) => console.warn(err));
   // iOS: Bewegungssensoren nur nach Antippen und nur über HTTPS
   if (typeof DeviceOrientationEvent !== 'undefined' &&
       typeof DeviceOrientationEvent.requestPermission === 'function') {
@@ -215,8 +230,18 @@ $('start').addEventListener('click', async () => {
     }
   }
   ipdMM = Number($('ipd').value);
-  video.src = videoURL;
-  try { await video.play(); } catch (err) { console.warn(err); }
+  const ppi = Number($('ppi').value) || 460;
+  CSS_PX_PER_MM = ppi / 25.4 / (window.devicePixelRatio || 1);
+  try { localStorage.setItem('vrplayer-ppi', String(ppi)); } catch (e) {}
+  // Android: Vollbild + Querformat sperren (iPhone unterstützt das nicht, wird dann übersprungen)
+  try {
+    if (document.documentElement.requestFullscreen) {
+      await document.documentElement.requestFullscreen();
+      if (screen.orientation && screen.orientation.lock) await screen.orientation.lock('landscape');
+    }
+  } catch (e) { /* nicht unterstützt */ }
+  await playPromise;
+  if (video.paused) { try { await video.play(); } catch (err) { console.warn(err); } }
   await new Promise((r) => video.readyState >= 1 ? r() : video.addEventListener('loadedmetadata', r, { once: true }));
   buildScreen($('mode').value);
   menu.style.display = 'none';
