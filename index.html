@@ -1,0 +1,330 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="VR-Player">
+<meta name="theme-color" content="#000000">
+<link rel="manifest" href="manifest.json">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<link rel="icon" type="image/png" href="icon-512.png">
+<title>Cardboard VR-Player – Bewerbungstraining</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #000; overflow: hidden;
+    font-family: -apple-system, system-ui, sans-serif; color: #fff;
+    -webkit-user-select: none; user-select: none; touch-action: none; }
+  canvas { display: block; position: fixed; inset: 0; }
+  #menu { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
+    background: #111; z-index: 10; overflow: auto; padding: 20px; box-sizing: border-box; }
+  #menu .box { max-width: 420px; width: 100%; }
+  h1 { font-size: 22px; margin: 0 0 6px; }
+  p { color: #bbb; font-size: 14px; line-height: 1.4; margin: 6px 0 14px; }
+  label { display: block; font-size: 14px; margin: 14px 0 6px; color: #ddd; }
+  select, input[type=file], input[type=number] { width: 100%; font-size: 16px; padding: 10px; box-sizing: border-box;
+    border-radius: 10px; border: 1px solid #444; background: #222; color: #fff; }
+  input[type=range] { width: 100%; }
+  button { width: 100%; font-size: 18px; padding: 14px; margin-top: 20px; border: 0; border-radius: 12px;
+    background: #2f7cf6; color: #fff; font-weight: 600; }
+  button:disabled { background: #444; color: #888; }
+  #hint { position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%); z-index: 5;
+    background: rgba(0,0,0,.7); padding: 12px 16px; border-radius: 10px; font-size: 15px;
+    text-align: center; pointer-events: none; display: none; }
+  #divider { position: fixed; top: 0; bottom: 0; left: 50%; width: 2px; margin-left: -1px;
+    background: #333; z-index: 4; display: none; pointer-events: none; }
+  #err { color: #ff6b6b; font-size: 14px; display: none; }
+  .small { font-size: 12px; color: #888; }
+</style>
+</head>
+<body>
+
+<div id="menu">
+  <div class="box">
+    <h1>Cardboard VR-Player</h1>
+    <p>Das Video wird nur auf diesem Gerät abgespielt und nirgendwo hochgeladen.</p>
+
+    <label for="file">1. Video auswählen</label>
+    <input id="file" type="file" accept="video/*">
+
+    <label for="mode">2. Videoformat</label>
+    <select id="mode">
+      <option value="360">360° (Rundumvideo)</option>
+      <option value="180">180° (Halbkugel)</option>
+      <option value="flat">Normales Video (virtuelle Leinwand)</option>
+    </select>
+
+    <label for="ipd">3. Linsenabstand: <span id="ipdVal">64</span> mm</label>
+    <input id="ipd" type="range" min="56" max="72" step="1" value="64">
+
+    <label for="ppi">4. Pixeldichte des Displays (ppi)</label>
+    <input id="ppi" type="number" inputmode="numeric" min="200" max="700" value="460">
+    <p class="small">iPhone 14 Pro: 460. Bei anderen Handys den ppi-Wert aus den technischen Daten eintragen
+      (z. B. „Pixel 9 Pro ppi“ suchen). Der Wert wird auf diesem Gerät gespeichert.</p>
+
+    <button id="start" disabled>Start</button>
+    <p id="err"></p>
+    <p class="small">Handy quer in die Brille legen.
+      Bildschirm antippen bzw. Cardboard-Taste drücken = Blickrichtung neu ausrichten.
+      Doppeltippen = Pause/Weiter. Mit dem Finger nach unten wischen = zurück zum Menü.</p>
+  </div>
+</div>
+<div id="divider"></div>
+<div id="hint"></div>
+
+<script>
+(function () {
+'use strict';
+var $ = function (id) { return document.getElementById(id); };
+var menu = $('menu'), hint = $('hint'), divider = $('divider');
+var videoURL = null;
+
+function showErr(msg) { var el = $('err'); el.textContent = msg; el.style.display = 'block'; }
+
+// ---------- Menü ----------
+$('file').addEventListener('change', function (e) {
+  var f = e.target.files[0];
+  if (!f) return;
+  if (videoURL) URL.revokeObjectURL(videoURL);
+  videoURL = URL.createObjectURL(f);
+  $('start').disabled = false;
+});
+$('ipd').addEventListener('input', function (e) { $('ipdVal').textContent = e.target.value; });
+try { var savedPpi = localStorage.getItem('vrplayer-ppi'); if (savedPpi) $('ppi').value = savedPpi; } catch (e) {}
+
+// ---------- Video ----------
+var video = document.createElement('video');
+video.setAttribute('playsinline', '');
+video.setAttribute('webkit-playsinline', '');
+video.loop = true;
+
+// ---------- WebGL (ohne externe Bibliothek) ----------
+var canvas = document.createElement('canvas');
+document.body.appendChild(canvas);
+var gl = canvas.getContext('webgl', { antialias: false }) || canvas.getContext('experimental-webgl');
+if (!gl) { showErr('Dieses Gerät unterstützt kein WebGL – der Player kann hier nicht laufen.'); return; }
+
+var VS = 'attribute vec2 p; varying vec2 ndc; void main(){ ndc=p; gl_Position=vec4(p,0.0,1.0); }';
+// Für jeden Bildpunkt: Blickrichtung berechnen und passende Stelle im Video nachschlagen
+var FS = [
+  'precision highp float;',
+  'varying vec2 ndc;',
+  'uniform sampler2D tex; uniform mat3 rot; uniform vec2 tanHalf;',
+  'uniform int mode; uniform float arc; uniform float flatH;',
+  'const float PI = 3.14159265;',
+  'void main(){',
+  '  vec3 d = normalize(rot * vec3(ndc.x*tanHalf.x, ndc.y*tanHalf.y, -1.0));',
+  '  float lon = atan(d.x, -d.z);',
+  '  vec2 uv = vec2(0.0); bool inside = true;',
+  '  if (mode == 0) {',
+  '    uv = vec2(0.5 + lon/(2.0*PI), 0.5 - asin(clamp(d.y,-1.0,1.0))/PI);',
+  '  } else if (mode == 1) {',
+  '    if (abs(lon) > PI*0.5) inside = false;',
+  '    uv = vec2(0.5 + lon/PI, 0.5 - asin(clamp(d.y,-1.0,1.0))/PI);',
+  '  } else {',
+  '    float y = d.y / max(length(d.xz), 1e-4) * 3.0;',
+  '    uv = vec2(0.5 + lon/arc, 0.5 - y/flatH);',
+  '    if (abs(lon) > arc*0.5 || uv.y < 0.0 || uv.y > 1.0) inside = false;',
+  '  }',
+  '  gl_FragColor = inside ? texture2D(tex, uv) : vec4(0.03,0.03,0.03,1.0);',
+  '}'
+].join('\n');
+
+function compile(type, src) {
+  var sh = gl.createShader(type); gl.shaderSource(sh, src); gl.compileShader(sh);
+  if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(sh));
+  return sh;
+}
+var prog = gl.createProgram();
+try {
+  gl.attachShader(prog, compile(gl.VERTEX_SHADER, VS));
+  gl.attachShader(prog, compile(gl.FRAGMENT_SHADER, FS));
+  gl.linkProgram(prog);
+  if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog));
+} catch (e) { showErr('Grafikfehler: ' + e.message); return; }
+gl.useProgram(prog);
+
+var buf = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
+var locP = gl.getAttribLocation(prog, 'p');
+gl.enableVertexAttribArray(locP);
+gl.vertexAttribPointer(locP, 2, gl.FLOAT, false, 0, 0);
+
+var U = {};
+['tex', 'rot', 'tanHalf', 'mode', 'arc', 'flatH'].forEach(function (n) { U[n] = gl.getUniformLocation(prog, n); });
+
+var tex = gl.createTexture();
+gl.bindTexture(gl.TEXTURE_2D, tex);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGB, 1, 1, 0, gl.RGB, gl.UNSIGNED_BYTE, new Uint8Array([0, 0, 0]));
+gl.uniform1i(U.tex, 0);
+
+// ---------- Quaternionen (Kopfdrehung) ----------
+function qMul(a, b) {
+  return [a[3]*b[0] + a[0]*b[3] + a[1]*b[2] - a[2]*b[1],
+          a[3]*b[1] - a[0]*b[2] + a[1]*b[3] + a[2]*b[0],
+          a[3]*b[2] + a[0]*b[1] - a[1]*b[0] + a[2]*b[3],
+          a[3]*b[3] - a[0]*b[0] - a[1]*b[1] - a[2]*b[2]];
+}
+function qAxis(x, y, z, ang) { var s = Math.sin(ang / 2); return [x*s, y*s, z*s, Math.cos(ang / 2)]; }
+function qEulerYXZ(x, y, z) {
+  var c1 = Math.cos(x/2), c2 = Math.cos(y/2), c3 = Math.cos(z/2);
+  var s1 = Math.sin(x/2), s2 = Math.sin(y/2), s3 = Math.sin(z/2);
+  return [s1*c2*c3 + c1*s2*s3, c1*s2*c3 - s1*c2*s3, c1*c2*s3 - s1*s2*c3, c1*c2*c3 + s1*s2*s3];
+}
+function qToMat3(q) { // spaltenweise für WebGL
+  var x = q[0], y = q[1], z = q[2], w = q[3];
+  return new Float32Array([
+    1 - 2*(y*y + z*z), 2*(x*y + z*w),     2*(x*z - y*w),
+    2*(x*y - z*w),     1 - 2*(x*x + z*z), 2*(y*z + x*w),
+    2*(x*z + y*w),     2*(y*z - x*w),     1 - 2*(x*x + y*y)]);
+}
+function qYaw(q) {
+  var x = q[0], y = q[1], z = q[2], w = q[3];
+  return Math.atan2(2*(x*z + w*y), 1 - 2*(x*x + y*y));
+}
+
+var D2R = Math.PI / 180;
+var qPhone = [-Math.SQRT1_2, 0, 0, Math.SQRT1_2]; // Kamera schaut aus der Rückseite
+var orientation = null, needRecenter = true, yawOffset = [0, 0, 0, 1];
+var camQ = [0, 0, 0, 1];
+window.addEventListener('deviceorientation', function (e) { if (e.alpha !== null) orientation = e; });
+
+function screenAngle() {
+  if (screen.orientation && typeof screen.orientation.angle === 'number') return screen.orientation.angle;
+  return window.orientation || 0;
+}
+function updateCamera() {
+  if (!orientation) return;
+  var q = qEulerYXZ(orientation.beta * D2R, orientation.alpha * D2R, -orientation.gamma * D2R);
+  q = qMul(q, qPhone);
+  q = qMul(q, qAxis(0, 0, 1, -screenAngle() * D2R));
+  if (needRecenter) { yawOffset = qAxis(0, 1, 0, -qYaw(q)); needRecenter = false; }
+  camQ = qMul(yawOffset, q);
+}
+
+// ---------- Darstellung ----------
+var CSS_PX_PER_MM = 460 / 25.4 / 3, ipdMM = 64, modeNum = 0, running = false;
+var FOV_Y = 80 * D2R, ARC = Math.PI / 2.4, flatH = 2;
+
+function resize() {
+  var dpr = Math.min(window.devicePixelRatio || 1, 2);
+  canvas.width = Math.round(window.innerWidth * dpr);
+  canvas.height = Math.round(window.innerHeight * dpr);
+  canvas.style.width = window.innerWidth + 'px';
+  canvas.style.height = window.innerHeight + 'px';
+}
+window.addEventListener('resize', resize);
+resize();
+
+function frame() {
+  if (!running) return;
+  updateCamera();
+  if (video.readyState >= 2) {
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    try { gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGB, gl.RGB, gl.UNSIGNED_BYTE, video); } catch (e) {}
+  }
+  var W = canvas.width, H = canvas.height, scale = W / window.innerWidth;
+  var eyeW = Math.min(ipdMM * CSS_PX_PER_MM * scale, W / 2);
+  gl.disable(gl.SCISSOR_TEST);
+  gl.viewport(0, 0, W, H);
+  gl.clearColor(0, 0, 0, 1); gl.clear(gl.COLOR_BUFFER_BIT);
+  var tanY = Math.tan(FOV_Y / 2);
+  gl.uniform2f(U.tanHalf, tanY * eyeW / H, tanY);
+  gl.uniformMatrix3fv(U.rot, false, qToMat3(camQ));
+  gl.uniform1i(U.mode, modeNum);
+  gl.uniform1f(U.arc, ARC);
+  gl.uniform1f(U.flatH, flatH);
+  gl.enable(gl.SCISSOR_TEST);
+  [W / 2 - eyeW, W / 2].forEach(function (x) {
+    gl.viewport(Math.round(x), 0, Math.round(eyeW), H);
+    gl.scissor(Math.round(x), 0, Math.round(eyeW), H);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+  });
+  requestAnimationFrame(frame);
+}
+
+function showHint(text, ms) {
+  hint.textContent = text; hint.style.display = 'block';
+  clearTimeout(showHint.t);
+  showHint.t = setTimeout(function () { hint.style.display = 'none'; }, ms || 2500);
+}
+
+// ---------- Start ----------
+$('start').addEventListener('click', function () {
+  // Video sofort im Tipp-Ereignis starten (iOS erlaubt Ton nur direkt nach dem Antippen)
+  video.src = videoURL;
+  var playPromise = video.play();
+  if (playPromise && playPromise.catch) playPromise.catch(function (e) { console.warn(e); });
+
+  var permission = Promise.resolve();
+  if (typeof DeviceOrientationEvent !== 'undefined' &&
+      typeof DeviceOrientationEvent.requestPermission === 'function') {
+    permission = DeviceOrientationEvent.requestPermission().then(function (res) {
+      if (res !== 'granted') showHint('Ohne Bewegungssensoren kein Kopftracking', 4000);
+    }).catch(function () { showHint('Sensoren nicht verfügbar – Seite über https:// öffnen?', 5000); });
+  }
+
+  // Android: Vollbild + Querformat (iPhone kann das nicht, wird übersprungen)
+  try {
+    var el = document.documentElement;
+    if (el.requestFullscreen) {
+      el.requestFullscreen().then(function () {
+        if (screen.orientation && screen.orientation.lock) return screen.orientation.lock('landscape');
+      }).catch(function () {});
+    }
+  } catch (e) {}
+
+  ipdMM = Number($('ipd').value) || 64;
+  var ppi = Number($('ppi').value) || 460;
+  CSS_PX_PER_MM = ppi / 25.4 / (window.devicePixelRatio || 1);
+  try { localStorage.setItem('vrplayer-ppi', String(ppi)); } catch (e) {}
+  var m = $('mode').value;
+  modeNum = m === '360' ? 0 : m === '180' ? 1 : 2;
+
+  function begin() {
+    var aspect = (video.videoWidth && video.videoHeight) ? video.videoWidth / video.videoHeight : 16 / 9;
+    flatH = (ARC * 3) / aspect;
+    menu.style.display = 'none';
+    divider.style.display = 'block';
+    needRecenter = true;
+    running = true;
+    resize();
+    requestAnimationFrame(frame);
+    if (window.innerWidth < window.innerHeight) showHint('Handy quer drehen (Ausrichtungssperre aus!)', 4000);
+    else showHint('Geradeaus schauen und tippen = neu ausrichten');
+  }
+  permission.then(function () {
+    if (video.readyState >= 1) begin();
+    else video.addEventListener('loadedmetadata', begin, { once: true });
+  });
+});
+
+// ---------- Gesten im Player ----------
+var lastTap = 0, touchStartY = null;
+canvas.addEventListener('touchstart', function (e) { touchStartY = e.touches[0].clientY; }, { passive: true });
+canvas.addEventListener('touchend', function (e) {
+  var endY = e.changedTouches[0].clientY;
+  if (touchStartY !== null && endY - touchStartY > 120) { // nach unten wischen -> Menü
+    video.pause(); running = false;
+    divider.style.display = 'none'; menu.style.display = 'flex';
+    return;
+  }
+  var now = Date.now();
+  if (now - lastTap < 350) {          // Doppeltippen -> Pause/Weiter
+    if (video.paused) { video.play(); showHint('▶︎', 800); } else { video.pause(); showHint('Pause', 800); }
+    lastTap = 0;
+  } else {                            // Einfach tippen -> neu ausrichten
+    needRecenter = true; lastTap = now;
+  }
+});
+canvas.addEventListener('click', function () { needRecenter = true; }); // Desktop-Test
+})();
+</script>
+</body>
+</html>
